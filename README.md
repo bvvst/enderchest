@@ -1,14 +1,15 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
+<img width="360" height="360" alt="image" src="https://github.com/user-attachments/assets/4079b92b-69d7-48ce-a49b-a75a8ff4e313" />
 
 # enderchest
 
-Tiny paste and file share with 5-digit links (`/s/12345`), built only on Cloudflare: one Worker, D1, R2, the Cache API, rate limiting and Turnstile. Live at [enderchest.sh](https://enderchest.sh).
+self host your own pastebin/privnote/fileshare/cdn on Cloudflare. 
+or just use it here [enderchest.sh](https://enderchest.sh). uploads last 10 minutes, unless you have an account (accounts are invite only).
 
-- Passkey-only accounts. The first signup becomes admin; everyone else needs an invite.
-- Signed in: uploads up to 100 MB that last 24h or forever.
-- Signed out: uploads up to 10 MB (512 KB pastes) that last 10 minutes, behind Turnstile and per-IP and global limits.
-- Optional end-to-end encryption: AES-256-GCM in the browser, with the key only in the link's `#fragment`.
-- `/admin` invites by email, revokes accounts and lists reported shares.
+i often need to quickly paste stuff from computer to computer. i think its just easiest to go to a website and enter a short pin.
+
+it's secure: optional end-to-end encryption with AES-256-GCM in the browser, with the key in the link's `#fragment`. similar to privnote, 1password sharing, doppler secret sharing, and [vanish.so](https://vanish.so)
+it's got basic protection: rate limiting and Turnstile, guest users are capped at 10 MB uploads that last 10 min.
+it's tiny: one Worker, D1, R2, the Cache API.
 
 ## Setup
 
