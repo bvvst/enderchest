@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "luke-cdn",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "17cca7fc349fd81fe0be32efb3e3ea46",
+  "workers_dev": true,
+  "assets": { "directory": "./public" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "luke-cdn", "database_id": "65ed7913-14ae-4de1-ad17-0640a23131e8" }
+  ],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "luke-cdn" }],
+  "ratelimits": [
+    { "name": "LOOKUP_LIMIT", "namespace_id": "4201", "simple": { "limit": 30, "period": 60 } },
+    { "name": "AUTH_LIMIT", "namespace_id": "4202", "simple": { "limit": 20, "period": 60 } }
+  ],
+  // Purge expired uploads every 15 minutes.
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "vars": {
+    "APP_NAME": "share",
+    // Set to e.g. "invites@yourdomain.com" after onboarding the domain in
+    // Email Service and uncommenting the send_email binding below.
+    "EMAIL_FROM": ""
+  },
+  // "send_email": [{ "name": "EMAIL" }],
+  "observability": { "enabled": true }
+}

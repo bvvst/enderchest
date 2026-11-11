@@ -1,0 +1,9 @@
+main{max-width:36rem;margin:0 auto;padding:1.5rem 1rem;display:flex;flex-direction:column;align-items:center;gap:2rem;text-align:center}
+section,form,#result{display:flex;flex-direction:column;align-items:center;gap:.5rem;width:100%}
+h1,h2,p{margin:0}
+textarea,#link{width:100%;box-sizing:border-box}
+ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:.75rem}
+pre{max-width:100%;box-sizing:border-box;overflow:auto;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;align-self:stretch}
+img,video,iframe{max-width:100%}
+iframe{width:100%;height:70vh;border:0}
+[hidden]{display:none!important}
