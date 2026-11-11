@@ -5,7 +5,7 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "17cca7fc349fd81fe0be32efb3e3ea46",
-  "workers_dev": true,
+  "workers_dev": false,
   "assets": { "directory": "./public" },
   "d1_databases": [
     { "binding": "DB", "database_name": "luke-cdn", "database_id": "65ed7913-14ae-4de1-ad17-0640a23131e8" }
