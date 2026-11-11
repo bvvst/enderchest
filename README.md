@@ -1,8 +1,8 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# luke-cdn
+# enderchest
 
-Tiny paste + file share on Cloudflare only: one Worker, D1 (accounts, passkeys, share index), R2 (file bytes), the edge Cache API, rate-limit bindings, and a cron to sweep expired uploads.
+[enderchest.sh](https://enderchest.sh): tiny paste + file share on Cloudflare only: one Worker, D1 (accounts, passkeys, share index), R2 (file bytes), the edge Cache API, rate-limit bindings, and a cron to sweep expired uploads.
 
 - `/` enter a 5-digit code, or (signed in) paste text / pick or drop a file
 - `/s/12345` view a share · `/s/12345/raw` raw bytes (unencrypted only)

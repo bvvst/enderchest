@@ -18,7 +18,7 @@
   // Purge expired uploads every 15 minutes.
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
-    "APP_NAME": "share",
+    "APP_NAME": "enderchest",
     // Set to e.g. "invites@yourdomain.com" after onboarding the domain in
     // Email Service and uncommenting the send_email binding below.
     "EMAIL_FROM": ""
