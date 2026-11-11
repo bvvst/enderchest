@@ -4,7 +4,6 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  "account_id": "17cca7fc349fd81fe0be32efb3e3ea46",
   "workers_dev": false,
   "assets": { "directory": "./public" },
   "d1_databases": [
