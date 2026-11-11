@@ -2,7 +2,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const data = JSON.parse($("data").textContent);
-  const msg = (t) => { if ($("msg")) $("msg").textContent = t || ""; };
+  const say = (id, t) => { if ($(id)) $(id).textContent = t || ""; };
+  const msg = (t) => say("msg", t);
 
   const b2u = (buf) => {
     const b = new Uint8Array(buf);
@@ -68,20 +69,31 @@
     });
   }
 
-  const run = (fn) => async (e) => {
+  const run = (fn, out = "msg") => async (e) => {
     const btn = e && e.currentTarget;
     if (btn) btn.disabled = true;
-    msg("");
-    try { await fn(e); } catch (err) { msg(err.name === "NotAllowedError" ? "cancelled" : err.message); }
+    say(out, "");
+    try { await fn(e); } catch (err) { say(out, err.name === "NotAllowedError" ? "cancelled" : err.message); }
     if (btn) btn.disabled = false;
   };
+  const authOut = $("authmsg") ? "authmsg" : "msg";
 
-  if ($("login")) $("login").onclick = run(async () => { await login(); location.reload(); });
+  if ($("login")) $("login").onclick = run(async () => { await login(); location.reload(); }, authOut);
   if ($("register")) $("register").onclick = run(async () => {
     if (data && data.invite) await register({ invite: data.invite });
     else await register({ email: $("email").value.trim() });
     location.href = "/";
-  });
+  }, authOut);
+
+  /* ---------- turnstile (anonymous uploads) ---------- */
+
+  let ts = null;
+  window.tsReady = () => {
+    const el = $("ts");
+    if (el && el.dataset.sitekey) ts = turnstile.render(el, { sitekey: el.dataset.sitekey, appearance: "interaction-only", size: "flexible" });
+  };
+  const tsToken = () => (ts !== null && window.turnstile ? turnstile.getResponse(ts) || "" : "");
+  const tsReset = () => { if (ts !== null && window.turnstile) turnstile.reset(ts); };
   if ($("logout")) $("logout").onclick = run(async () => { await api("/api/logout"); location.href = "/"; });
 
   /* ---------- encryption ---------- */
@@ -151,7 +163,16 @@
       const name = paste ? "paste.txt" : f.name;
       const type = paste ? "text/plain" : f.type || "application/octet-stream";
       let body = paste ? new TextEncoder().encode(text.value) : f;
-      if (body.size > 100 * 1024 * 1024 || body.byteLength > 100 * 1024 * 1024) throw new Error("max 100 MB");
+      const n = paste ? body.byteLength : f.size;
+      const more = data.anon ? ", sign in for more" : "";
+      if (paste && n > data.maxPaste) throw new Error(`pastes are max ${data.maxPaste / 1024} KB${more}`);
+      if (n > data.max) throw new Error(`max ${data.max / 1024 / 1024} MB${more}`);
+      const headers = {};
+      if (data.anon) {
+        const t = tsToken();
+        if (!t) throw new Error("still checking you're human, try again in a second");
+        headers["x-turnstile"] = t;
+      }
       const enc = $("encrypt").checked;
       let frag = "";
       if (enc) {
@@ -161,13 +182,19 @@
         frag = "#" + r.frag;
         msg("");
       }
-      const d = await send(body, {
-        "content-type": enc ? "application/octet-stream" : type,
-        "x-name": encodeURIComponent(name),
-        "x-kind": paste ? "paste" : "file",
-        "x-forever": $("forever").checked ? "1" : "0",
-        "x-encrypted": enc ? "1" : "0",
-      });
+      let d;
+      try {
+        d = await send(body, {
+          ...headers,
+          "content-type": enc ? "application/octet-stream" : type,
+          "x-name": encodeURIComponent(name),
+          "x-kind": paste ? "paste" : "file",
+          "x-forever": $("forever") && $("forever").checked ? "1" : "0",
+          "x-encrypted": enc ? "1" : "0",
+        });
+      } finally {
+        tsReset(); // tokens are single-use
+      }
       const link = d.url + frag;
       $("result").hidden = false;
       $("link").value = link;
@@ -175,7 +202,7 @@
       text.value = "";
       file.value = "";
       copy(link).catch(() => {});
-      msg("uploaded · link copied");
+      msg(data.anon ? "uploaded · link copied · expires in 10 minutes" : "uploaded · link copied");
     });
     $("copy").onclick = (e) => copy($("link").value, e.currentTarget);
   }
@@ -214,6 +241,12 @@
 
   /* ---------- view ---------- */
 
+  if ($("report")) $("report").onclick = run(async () => {
+    if (!confirm("report this share to the admin?")) return;
+    await api("/api/report", { code: data.code });
+    $("report").replaceWith("reported, thanks");
+  });
+
   if ($("content") && data && data.code) {
     const box = $("content");
     const actions = $("actions");
@@ -241,7 +274,7 @@
         const a = add(document.createElement("audio"));
         a.controls = true;
         a.src = url;
-      } else if (type === "application/pdf" && !data.encrypted) {
+      } else if (type === "application/pdf" && !data.encrypted && !data.anon) {
         add(document.createElement("iframe")).src = url;
       }
       const a = document.createElement("a");

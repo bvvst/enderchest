@@ -5,11 +5,11 @@ export const esc = (s: unknown) =>
 
 const CSP = [
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://challenges.cloudflare.com",
   "style-src 'self'",
   "img-src 'self' blob: data:",
   "media-src 'self' blob:",
-  "frame-src 'self' blob:",
+  "frame-src 'self' blob: https://challenges.cloudflare.com",
   "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
@@ -17,7 +17,7 @@ const CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-export function page(title: string, body: string, data: unknown = null, init: ResponseInit = {}): Response {
+export function page(title: string, body: string, data: unknown = null, init: ResponseInit = {}, head = ""): Response {
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const html = `<!doctype html>
 <html lang="en">
@@ -29,6 +29,7 @@ export function page(title: string, body: string, data: unknown = null, init: Re
 <link rel="stylesheet" href="/app.css">
 <script type="application/json" id="data">${json}</script>
 <script src="/app.js" defer></script>
+${head}
 </head>
 <body>
 <main>
@@ -42,6 +43,8 @@ ${body}
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("cache-control", "no-store");
+  // Share pages stay out of search engines (kills the incentive for SEO spam); home opts back in.
+  if (!headers.has("x-robots-tag")) headers.set("x-robots-tag", "noindex, nofollow");
   return new Response(html, { ...init, headers });
 }
 

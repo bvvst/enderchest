@@ -13,12 +13,15 @@
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "luke-cdn" }],
   "ratelimits": [
     { "name": "LOOKUP_LIMIT", "namespace_id": "4201", "simple": { "limit": 30, "period": 60 } },
-    { "name": "AUTH_LIMIT", "namespace_id": "4202", "simple": { "limit": 20, "period": 60 } }
+    { "name": "AUTH_LIMIT", "namespace_id": "4202", "simple": { "limit": 20, "period": 60 } },
+    { "name": "ANON_LIMIT", "namespace_id": "4203", "simple": { "limit": 5, "period": 60 } }
   ],
-  // Purge expired uploads every 15 minutes.
-  "triggers": { "crons": ["*/15 * * * *"] },
+  // Purge expired uploads every 5 minutes.
+  "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "APP_NAME": "enderchest",
+    // Turnstile widget for anonymous uploads (secret is TURNSTILE_SECRET via `wrangler secret put`).
+    "TURNSTILE_SITEKEY": "0x4AAAAAAF8O6LALsJSFmTu-",
     // Set to e.g. "invites@yourdomain.com" after onboarding the domain in
     // Email Service and uncommenting the send_email binding below.
     "EMAIL_FROM": ""

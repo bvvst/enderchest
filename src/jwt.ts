@@ -45,3 +45,8 @@ export async function verify<T = Record<string, unknown>>(token: string | undefi
     return null;
   }
 }
+
+export async function hmacHex(secret: string, data: string): Promise<string> {
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(data)));
+  return [...sig.slice(0, 12)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}

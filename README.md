@@ -2,15 +2,22 @@
 
 # enderchest
 
-[enderchest.sh](https://enderchest.sh): tiny paste + file share on Cloudflare only: one Worker, D1 (accounts, passkeys, share index), R2 (file bytes), the edge Cache API, rate-limit bindings, and a cron to sweep expired uploads.
+[enderchest.sh](https://enderchest.sh): tiny paste + file share on Cloudflare only: one Worker, D1 (accounts, passkeys, share index), R2 (file bytes), the edge Cache API, rate-limit bindings, Turnstile, and a cron to sweep expired uploads.
 
-- `/` enter a 5-digit code, or (signed in) paste text / pick or drop a file
+- `/` enter a 5-digit code, or paste text / pick or drop a file
 - `/s/12345` view a share · `/s/12345/raw` raw bytes (unencrypted only)
 - `/admin` invite by email, cancel invites, revoke accounts (deletes their uploads)
-- uploads last 24h unless "keep forever" is checked; max 100 MB
+- signed in: uploads last 24h unless "keep forever" is checked; max 100 MB
+- signed out (anonymous): uploads last 10 minutes; max 10 MB (pastes 512 KB); gated by Turnstile; 5 per 10 min per IP (IPv6 per /64, stored as a keyed hash) plus a 5/min burst limit; a global breaker pauses anonymous uploads for the rest of the hour after 500 uploads or 2 GB. Anonymous non-media files download instead of rendering
+- share pages send `noindex`; anyone can "report abuse", reported shares show on `/admin` with delete
 - "encrypt" does AES-256-GCM in the browser; the key is only in the `#fragment` of the link and never reaches the server
 - passkey-only accounts; the first account becomes admin, everyone else needs an invite
 - sessions are HS256 JWT cookies with no expiry (re-set on each visit to beat the browser's 400-day cookie cap); revoking deletes the user row, which kills every session
+
+## Abuse
+
+- Enable Cloudflare's CSAM Scanning Tool: dashboard → enderchest.sh → Caching → Configuration → CSAM Scanning Tool.
+- Limits live at the top of `src/index.ts` (`ANON_*`).
 
 ## Deploy
 
@@ -19,6 +26,7 @@ npm i
 npx wrangler d1 create luke-cdn && npx wrangler r2 bucket create luke-cdn   # put the ids in wrangler.jsonc
 npm run db:init
 openssl rand -base64 48 | npx wrangler secret put JWT_SECRET
+npx wrangler secret put TURNSTILE_SECRET   # site key goes in wrangler.jsonc vars
 npm run deploy
 ```
 

@@ -4,7 +4,7 @@ import {
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
-import { b64url, sign, unb64url, verify } from "./jwt";
+import { b64url, hmacHex, sign, unb64url, verify } from "./jwt";
 import { esc, left, openForm, page, size } from "./html";
 
 interface Env {
@@ -12,10 +12,13 @@ interface Env {
   BUCKET: R2Bucket;
   LOOKUP_LIMIT: RateLimit;
   AUTH_LIMIT: RateLimit;
+  ANON_LIMIT: RateLimit;
   EMAIL?: { send(msg: { to: string; from: string; subject: string; text: string; html?: string }): Promise<unknown> };
   JWT_SECRET: string;
   APP_NAME: string;
   EMAIL_FROM: string;
+  TURNSTILE_SITEKEY: string;
+  TURNSTILE_SECRET?: string;
 }
 
 type User = { id: string; email: string; is_admin: number };
@@ -30,10 +33,21 @@ type Share = {
   encrypted: number;
   created_at: number;
   expires_at: number | null;
+  ip: string | null;
+  reported: number;
 };
 
 const MAX_BYTES = 100 * 1024 * 1024; // Workers request body limit on Free/Pro.
 const DAY = 86400;
+
+// Anonymous (signed-out) uploads.
+const ANON_TTL = 10 * 60;
+const ANON_MAX_BYTES = 10 * 1024 * 1024;
+const ANON_MAX_PASTE = 512 * 1024;
+const ANON_PER_IP = 5; // per ANON_TTL window, per IP (IPv6: per /64)
+// Circuit breaker: across everyone, per clock hour. Over this, anonymous uploads pause until the next hour.
+const ANON_HOURLY_COUNT = 500;
+const ANON_HOURLY_BYTES = 2 * 1024 * 1024 * 1024;
 const SESSION_COOKIE = "s";
 const CHALLENGE_COOKIE = "c";
 // Browsers cap cookie lifetime at 400 days; we refresh it on every visit, so sessions never end.
@@ -87,9 +101,37 @@ function checkOrigin(req: Request, url: URL) {
   if (req.headers.get("origin") !== url.origin) throw new HttpError(403, "bad origin");
 }
 
-async function limited(limiter: RateLimit, req: Request) {
-  const { success } = await limiter.limit({ key: req.headers.get("cf-connecting-ip") || "?" });
-  if (!success) throw new HttpError(429, "slow down");
+async function limited(limiter: RateLimit, req: Request, key = req.headers.get("cf-connecting-ip") || "?", message = "slow down") {
+  const { success } = await limiter.limit({ key });
+  if (!success) throw new HttpError(429, message);
+}
+
+// IPv6 users can rotate through a whole /64, so throttle on the prefix.
+function ipPrefix(ip: string) {
+  if (!ip.includes(":")) return ip;
+  const [h, t = ""] = ip.split("::");
+  const head = h ? h.split(":") : [];
+  const tail = t ? t.split(":") : [];
+  const full = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail];
+  return full.slice(0, 4).map((x) => x.padStart(4, "0")).join(":") + "::/64";
+}
+
+// Stored with anonymous uploads so they can be throttled; keyed hash, never the raw IP.
+const ipKey = (req: Request, env: Env) => hmacHex(env.JWT_SECRET, "ip:" + ipPrefix(req.headers.get("cf-connecting-ip") || "?"));
+
+async function verifyTurnstile(req: Request, env: Env, url: URL) {
+  if (!env.TURNSTILE_SECRET) throw new HttpError(503, "anonymous uploads aren't enabled yet, sign in to upload");
+  const token = req.headers.get("x-turnstile");
+  if (!token) throw new HttpError(400, "still checking you're human, try again in a second");
+  const form = new FormData();
+  form.append("secret", env.TURNSTILE_SECRET);
+  form.append("response", token);
+  form.append("remoteip", req.headers.get("cf-connecting-ip") || "");
+  const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form })
+    .then((r) => r.json<{ success: boolean; hostname?: string }>())
+    .catch(() => ({ success: false, hostname: undefined }));
+  // (Turnstile's test keys report hostname example.com, so skip the check in local dev.)
+  if (!r.success || (r.hostname && r.hostname !== url.hostname && url.hostname !== "localhost")) throw new HttpError(403, "human check failed, reload and try again");
 }
 
 async function userCount(env: Env) {
@@ -209,7 +251,7 @@ async function session(env: Env, uid: string) {
 /* ---------------- shares ---------------- */
 
 async function upload(req: Request, env: Env, url: URL) {
-  const user = await requireUser(req, env);
+  const user = (await currentUser(req, env))?.user ?? null;
   const len = Number(req.headers.get("content-length"));
   if (!len || !req.body) throw new HttpError(400, "empty upload");
   if (len > MAX_BYTES) throw new HttpError(413, "max 100 MB");
@@ -217,7 +259,7 @@ async function upload(req: Request, env: Env, url: URL) {
   const encrypted = req.headers.get("x-encrypted") === "1";
   // Encrypted shares don't reveal whether they're a paste or a file.
   const kind = !encrypted && req.headers.get("x-kind") === "paste" ? "paste" : "file";
-  const forever = req.headers.get("x-forever") === "1";
+  const forever = !!user && req.headers.get("x-forever") === "1";
   let name = "encrypted";
   if (!encrypted) {
     try {
@@ -229,12 +271,28 @@ async function upload(req: Request, env: Env, url: URL) {
   }
   const type = encrypted ? "application/octet-stream" : (req.headers.get("content-type") || "application/octet-stream").slice(0, 100);
   const t = now();
-  const expires = forever ? null : t + DAY;
+  const expires = forever ? null : t + (user ? DAY : ANON_TTL);
+
+  let ip: string | null = null;
+  const hour = Math.floor(t / 3600);
+  if (!user) {
+    // Cheapest checks first; Turnstile last since verifying burns the token.
+    if (len > ANON_MAX_BYTES) throw new HttpError(413, "anonymous uploads are max 10 MB, sign in for more");
+    if (kind === "paste" && len > ANON_MAX_PASTE) throw new HttpError(413, "anonymous pastes are max 512 KB, sign in for more");
+    ip = await ipKey(req, env);
+    await limited(env.ANON_LIMIT, req, ip, "too many uploads, wait a minute or sign in");
+    const recent = await env.DB.prepare("SELECT COUNT(*) AS n FROM shares WHERE ip = ? AND created_at > ?").bind(ip, t - ANON_TTL).first<{ n: number }>();
+    if ((recent?.n ?? 0) >= ANON_PER_IP) throw new HttpError(429, `max ${ANON_PER_IP} anonymous uploads per 10 minutes, sign in for more`);
+    const usage = await env.DB.prepare("SELECT count, bytes FROM anon_usage WHERE hour = ?").bind(hour).first<{ count: number; bytes: number }>();
+    if (usage && (usage.count >= ANON_HOURLY_COUNT || usage.bytes + len > ANON_HOURLY_BYTES))
+      throw new HttpError(503, "anonymous uploads are paused for the rest of the hour, sign in or try later");
+    await verifyTurnstile(req, env, url);
+  }
 
   const blob = rand(16);
   const obj = await env.BUCKET.put(blob, req.body, {
     httpMetadata: { contentType: type },
-    customMetadata: { exp: expires == null ? "" : String(expires) },
+    customMetadata: { exp: expires == null ? "" : String(expires), anon: user ? "" : "1" },
   });
 
   for (let i = 0; i < 20; i++) {
@@ -245,9 +303,15 @@ async function upload(req: Request, env: Env, url: URL) {
       .first<{ blob: string }>();
     if (stale) await env.BUCKET.delete(stale.blob);
     const ins = await env.DB.prepare(
-      "INSERT OR IGNORE INTO shares (code, blob, user_id, kind, name, type, size, encrypted, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(code, blob, user.id, kind, name, type, obj.size, encrypted ? 1 : 0, t, expires).run();
-    if (ins.meta.changes) return json({ code, url: `${url.origin}/s/${code}` });
+      "INSERT OR IGNORE INTO shares (code, blob, user_id, kind, name, type, size, encrypted, created_at, expires_at, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(code, blob, user?.id ?? "", kind, name, type, obj.size, encrypted ? 1 : 0, t, expires, ip).run();
+    if (ins.meta.changes) {
+      if (!user)
+        await env.DB.prepare("INSERT INTO anon_usage (hour, count, bytes) VALUES (?, 1, ?) ON CONFLICT(hour) DO UPDATE SET count = count + 1, bytes = bytes + excluded.bytes")
+          .bind(hour, obj.size)
+          .run();
+      return json({ code, url: `${url.origin}/s/${code}`, expires });
+    }
   }
   await env.BUCKET.delete(blob);
   throw new HttpError(503, "no free codes, try again");
@@ -265,7 +329,7 @@ async function viewPage(req: Request, env: Env, code: string) {
   await limited(env.LOOKUP_LIMIT, req);
   const s = await getShare(env, code);
   if (!s) return page("not found", `<h1>${esc(code)}</h1><p>nothing here (it may have expired)</p><p><a href="/">home</a></p>`, null, { status: 404 });
-  const data = { code: s.code, kind: s.kind, name: s.name, type: s.type, size: s.size, encrypted: !!s.encrypted, raw: rawPath(s) };
+  const data = { code: s.code, kind: s.kind, name: s.name, type: s.type, size: s.size, encrypted: !!s.encrypted, anon: !s.user_id, raw: rawPath(s) };
   const meta = s.encrypted ? `encrypted · ${size(s.size)} · ${left(s.expires_at)}` : `${esc(s.name)} · ${size(s.size)} · ${left(s.expires_at)}`;
   return page(
     s.encrypted ? s.code : `${s.name} · ${s.code}`,
@@ -273,7 +337,8 @@ async function viewPage(req: Request, env: Env, code: string) {
 <p id="meta">${meta}</p>
 <section id="content"><p id="msg">loading…</p></section>
 <section id="actions"></section>
-<p><a href="/">home</a></p>`,
+<p><a href="/">home</a></p>
+<p><button id="report">report abuse</button></p>`,
     data,
   );
 }
@@ -298,8 +363,11 @@ async function serveBlob(req: Request, env: Env, ctx: ExecutionContext, blob: st
   headers.set("accept-ranges", "bytes");
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
+  headers.set("x-robots-tag", "noindex, nofollow");
   const type = headers.get("content-type") || "application/octet-stream";
-  const inline = /^(image\/(png|jpeg|gif|webp|avif)|video\/|audio\/|text\/|application\/pdf$)/.test(type);
+  const anon = obj.customMetadata?.anon === "1";
+  // Anonymous uploads only render inline for plain media/text; everything else downloads.
+  const inline = /^(image\/(png|jpeg|gif|webp|avif)|video\/|audio\/|text\/)/.test(type) || (!anon && type === "application/pdf");
   if (type.startsWith("text/")) headers.set("content-type", "text/plain; charset=utf-8");
   headers.set("content-disposition", inline ? "inline" : "attachment");
   // Sandbox anything the browser renders on our origin (pdf viewers break under sandbox).
@@ -331,7 +399,35 @@ async function deleteShare(req: Request, env: Env, url: URL) {
   return json({ ok: true });
 }
 
+async function report(req: Request, env: Env) {
+  await limited(env.LOOKUP_LIMIT, req);
+  const { code } = await req.json<{ code: string }>();
+  await env.DB.prepare("UPDATE shares SET reported = 1 WHERE code = ?").bind(String(code)).run();
+  return json({ ok: true });
+}
+
 /* ---------------- pages ---------------- */
+
+function uploadForm(env: Env, anon: boolean) {
+  return `<section id="upload">
+<h2>share</h2>
+<textarea id="text" rows="8" placeholder="paste text, or drop a file anywhere" aria-label="text"></textarea>
+<input id="file" type="file" aria-label="file">
+${anon ? "" : `<label><input id="forever" type="checkbox"> keep forever</label>`}
+<label><input id="encrypt" type="checkbox"> encrypt</label>
+${anon ? `<div id="ts" data-sitekey="${esc(env.TURNSTILE_SITEKEY)}"></div>` : ""}
+<button id="send">upload</button>
+${anon ? `<p>anonymous uploads last 10 minutes, max 10 MB. sign in for more.</p>` : ""}
+<progress id="progress" max="1" value="0" hidden></progress>
+<p id="msg"></p>
+<div id="result" hidden>
+<input id="link" readonly aria-label="share link">
+<button id="copy">copy</button>
+</div>
+</section>`;
+}
+
+const TURNSTILE_JS = `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=tsReady" defer></script>`;
 
 async function homePage(req: Request, env: Env) {
   const s = await currentUser(req, env);
@@ -342,9 +438,16 @@ async function homePage(req: Request, env: Env) {
 <h2>create admin account</h2>
 <input id="email" type="email" placeholder="email" autocomplete="email" aria-label="email">
 <button id="register">create passkey</button>
+<p id="authmsg"></p>
 </section>`
-      : `<section><button id="login">sign in with passkey</button></section>`;
-    return page(env.APP_NAME, `<h1>${esc(env.APP_NAME)}</h1>${openForm}${auth}<p id="msg"></p>`);
+      : `<section><button id="login">sign in with passkey</button><p id="authmsg"></p></section>`;
+    return page(
+      env.APP_NAME,
+      `<h1>${esc(env.APP_NAME)}</h1>${openForm}${uploadForm(env, true)}${auth}`,
+      { anon: true, max: ANON_MAX_BYTES, maxPaste: ANON_MAX_PASTE },
+      { headers: { "x-robots-tag": "all" } },
+      TURNSTILE_JS,
+    );
   }
   const { user, token } = s;
   const rows = await env.DB.prepare(
@@ -358,24 +461,14 @@ async function homePage(req: Request, env: Env) {
         )
         .join("")}</ul>`
     : `<p>nothing yet</p>`;
+  const headers = new Headers({ "x-robots-tag": "all" });
+  // Re-issue the session cookie so the 400-day browser cap never lapses.
+  headers.append("set-cookie", cookie(SESSION_COOKIE, token, SESSION_MAX_AGE));
   return page(
     env.APP_NAME,
     `<h1>${esc(env.APP_NAME)}</h1>
 ${openForm}
-<section id="upload">
-<h2>share</h2>
-<textarea id="text" rows="8" placeholder="paste text, or drop a file anywhere" aria-label="text"></textarea>
-<input id="file" type="file" aria-label="file">
-<label><input id="forever" type="checkbox"> keep forever</label>
-<label><input id="encrypt" type="checkbox"> encrypt</label>
-<button id="send">upload</button>
-<progress id="progress" max="1" value="0" hidden></progress>
-<p id="msg"></p>
-<div id="result" hidden>
-<input id="link" readonly aria-label="share link">
-<button id="copy">copy</button>
-</div>
-</section>
+${uploadForm(env, false)}
 <section>
 <h2>your uploads</h2>
 ${list}
@@ -385,9 +478,8 @@ ${list}
 ${user.is_admin ? `<a href="/admin">admin</a>` : ""}
 <button id="logout">sign out</button>
 </section>`,
-    null,
-    // Re-issue the session cookie so the 400-day browser cap never lapses.
-    { headers: { "set-cookie": cookie(SESSION_COOKIE, token, SESSION_MAX_AGE) } },
+    { anon: false, max: MAX_BYTES, maxPaste: MAX_BYTES },
+    { headers },
   );
 }
 
@@ -413,6 +505,9 @@ async function adminPage(req: Request, env: Env) {
   const users = await env.DB.prepare(
     "SELECT u.id, u.email, u.is_admin, u.created_at, (SELECT COUNT(*) FROM shares WHERE user_id = u.id) AS n FROM users u ORDER BY u.created_at",
   ).all<User & { created_at: number; n: number }>();
+  const reported = await env.DB.prepare(
+    "SELECT s.code, s.name, s.size, s.encrypted, s.expires_at, u.email FROM shares s LEFT JOIN users u ON u.id = s.user_id WHERE s.reported = 1 AND (s.expires_at IS NULL OR s.expires_at > ?) ORDER BY s.created_at DESC LIMIT 100",
+  ).bind(now()).all<Share & { email: string | null }>();
   const invites = await env.DB.prepare("SELECT token, email, created_at FROM invites WHERE used_at IS NULL ORDER BY created_at DESC").all<{
     token: string;
     email: string;
@@ -429,6 +524,19 @@ async function adminPage(req: Request, env: Env) {
 <input id="link" readonly aria-label="invite link">
 <button id="copy">copy</button>
 </div>
+</section>
+<section>
+<h2>reported</h2>
+${
+  reported.results.length
+    ? `<ul>${reported.results
+        .map(
+          (r) =>
+            `<li><a href="/s/${r.code}">${r.code}</a> ${r.encrypted ? "encrypted" : esc(r.name)} · ${size(r.size)} · ${esc(r.email ?? "anonymous")} · ${left(r.expires_at)} <button data-del="${r.code}">delete</button></li>`,
+        )
+        .join("")}</ul>`
+    : "<p>none</p>"
+}
 </section>
 <section>
 <h2>pending invites</h2>
@@ -545,6 +653,8 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
         return upload(req, env, url);
       case "/api/delete":
         return deleteShare(req, env, url);
+      case "/api/report":
+        return report(req, env);
       case "/api/admin/invite":
         return createInvite(req, env, url);
       case "/api/admin/uninvite":
@@ -567,7 +677,7 @@ export default {
     }
   },
 
-  // Sweep expired shares from R2 + D1.
+  // Sweep expired shares from R2 + D1 (every 5 minutes; reads also enforce expiry exactly).
   async scheduled(_event, env) {
     for (;;) {
       const rows = await env.DB.prepare("SELECT code, blob FROM shares WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 500")
@@ -578,6 +688,7 @@ export default {
       await env.DB.batch(rows.results.map((r) => env.DB.prepare("DELETE FROM shares WHERE code = ? AND blob = ?").bind(r.code, r.blob)));
       if (rows.results.length < 500) break;
     }
+    await env.DB.prepare("DELETE FROM anon_usage WHERE hour < ?").bind(Math.floor(now() / 3600) - 48).run();
     // Drop invites older than 30 days that were never used.
     await env.DB.prepare("DELETE FROM invites WHERE used_at IS NULL AND created_at < ?").bind(now() - 30 * DAY).run();
   },

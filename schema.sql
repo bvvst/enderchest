@@ -32,7 +32,16 @@ CREATE TABLE IF NOT EXISTS shares (
   size INTEGER NOT NULL,
   encrypted INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER
+  expires_at INTEGER,
+  ip TEXT,
+  reported INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id);
 CREATE INDEX IF NOT EXISTS shares_expires ON shares(expires_at);
+CREATE INDEX IF NOT EXISTS shares_ip ON shares(ip, created_at);
+
+CREATE TABLE IF NOT EXISTS anon_usage (
+  hour INTEGER PRIMARY KEY,
+  count INTEGER NOT NULL,
+  bytes INTEGER NOT NULL
+);
