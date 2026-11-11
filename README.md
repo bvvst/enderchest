@@ -7,9 +7,9 @@ or just use it here [enderchest.sh](https://enderchest.sh). uploads last 10 minu
 
 i often need to quickly paste stuff from computer to computer. i think its just easiest to go to a website and enter a short pin.
 
-it's secure: optional end-to-end encryption with AES-256-GCM in the browser, with the key in the link's `#fragment`. similar to privnote, 1password sharing, doppler secret sharing, and [vanish.so](https://vanish.so)
-it's got basic protection: rate limiting and Turnstile, guest users are capped at 10 MB uploads that last 10 min.
-it's tiny: one Worker, D1, R2, the Cache API.
+- it's secure: optional end-to-end encryption with AES-256-GCM in the browser, with the key in the link's `#fragment`. similar to privnote, 1password sharing, doppler secret sharing, and [vanish.so](https://vanish.so)
+- it's got basic protection: rate limiting and Turnstile, guest users are capped at 10 MB uploads that last 10 min.
+- it's tiny: one Worker, D1, R2, the Cache API.
 
 ## Setup
 
